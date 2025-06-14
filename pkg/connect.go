@@ -25,6 +25,7 @@ func (c *connectionUnixSocket) Disconnect() error {
 	if c.conn == nil {
 		return nil
 	}
+
 	err := c.conn.Close()
 	c.conn = nil
 	return err

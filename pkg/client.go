@@ -6,8 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"os"
 	"runtime"
+	"sync"
 	"time"
 )
 
@@ -16,22 +16,20 @@ type Client struct {
 	Conn     Connection
 	sendChan chan []byte
 	done     chan struct{}
+	ready    chan struct{}
 }
 
 type RPC interface {
 	Send(message []string) error
 	Connect() error
 	Disconnect() error
-	EventLoop() error
+	EventLoop()
 }
 
 func (c *Client) Connect() error {
-
-	// handShake
-
-	message := map[string]any{
-		"v":         1,
-		"client_id": c.ID,
+	message := Frame{
+		V:        1,
+		ClientID: c.ID,
 	}
 
 	handshakeMessage, err := c.buildMessage(message, OpHandshake)
@@ -53,8 +51,9 @@ func (c *Client) Connect() error {
 	if err != nil {
 		return err
 	}
-
 	go c.eventLoop()
+	<-c.ready
+	close(c.ready)
 
 	fmt.Println("handshake response", response)
 	return nil
@@ -62,10 +61,7 @@ func (c *Client) Connect() error {
 
 func (c *Client) eventLoop() error {
 
-	c.sendChan = make(chan []byte)
-	c.done = make(chan struct{})
-
-	// Receiver goroutine
+	var readyOnce sync.Once
 	go func() {
 		for {
 			select {
@@ -79,15 +75,19 @@ func (c *Client) eventLoop() error {
 				}
 				opcode := binary.LittleEndian.Uint32([]byte(msg))
 				switch opcode {
-				case OpPong:
+				case uint32(OpPong):
 					slog.Info("Pong received")
-
-				case OpFrame:
+					readyOnce.Do(func() {
+						c.ready <- struct{}{}
+						slog.Info("Ready")
+					})
+				case uint32(OpFrame):
 					slog.Info("Frame received")
 					var status map[string]any
 					body := []byte(msg)
 					json.Unmarshal(body[8:], &status)
-				case OpClose:
+					slog.Info("Status", "status", status)
+				case uint32(OpClose):
 					slog.Info("Close received")
 					c.Disconnect()
 					return
@@ -98,7 +98,6 @@ func (c *Client) eventLoop() error {
 		}
 	}()
 
-	// Sender and ping goroutine
 	go func() {
 		ticker := time.NewTicker(15 * time.Second)
 		defer ticker.Stop()
@@ -107,7 +106,7 @@ func (c *Client) eventLoop() error {
 			case <-c.done:
 				return
 			case <-ticker.C:
-				pingMsg, err := c.buildMessage(map[string]any{}, OpPing)
+				pingMsg, err := c.buildMessage(Frame{V: 1, ClientID: c.ID, Cmd: "PING"}, OpPing)
 				if err != nil {
 					return
 				}
@@ -126,12 +125,13 @@ func (c *Client) eventLoop() error {
 }
 
 func (c *Client) Disconnect() error {
+	c.done <- struct{}{}
 	return c.Conn.Disconnect()
 }
 
-func (c *Client) buildMessage(message map[string]any, opcode uint32) ([]byte, error) {
+func (c *Client) buildMessage(frame Frame, opcode Opcode) ([]byte, error) {
 
-	defaultJSON, err := json.Marshal(message)
+	defaultJSON, err := json.Marshal(frame)
 	if err != nil {
 		return nil, err
 	}
@@ -144,32 +144,8 @@ func (c *Client) buildMessage(message map[string]any, opcode uint32) ([]byte, er
 	return buf.Bytes(), nil
 }
 
-func (c *Client) Send(message map[string]any) error {
-	// Set default command if not provided
-	if _, ok := message["cmd"]; !ok {
-		message["cmd"] = "SET_ACTIVITY"
-	}
-
-	// Set default args
-	defaultArgs := map[string]any{
-		"pid": os.Getpid(),
-		"activity": map[string]any{
-			"details": "Testing",
-			"state":   "Testing",
-		},
-	}
-
-	// Merge user-provided args with defaults
-	if userArgs, ok := message["args"].(map[string]any); ok {
-		for k, v := range userArgs {
-			defaultArgs[k] = v
-		}
-		message["args"] = defaultArgs
-	} else {
-		message["args"] = defaultArgs
-	}
-
-	completedMessage, err := c.buildMessage(message, OpFrame)
+func (c *Client) Send(frame Frame) error {
+	completedMessage, err := c.buildMessage(frame, OpFrame)
 	if err != nil {
 		return err
 	}
@@ -180,13 +156,59 @@ func (c *Client) Send(message map[string]any) error {
 
 func NewClient(id string) *Client {
 	conn := ConnectionFactory(runtime.GOOS)
-	return &Client{ID: id, Conn: conn, sendChan: make(chan []byte), done: make(chan struct{})}
+	return &Client{ID: id, Conn: conn, sendChan: make(chan []byte), done: make(chan struct{}), ready: make(chan struct{})}
 }
 
+type Opcode uint32
+
 const (
-	OpHandshake = 0
-	OpFrame     = 1
-	OpClose     = 2
-	OpPing      = 3
-	OpPong      = 4
+	OpHandshake Opcode = 0
+	OpFrame     Opcode = 1
+	OpClose     Opcode = 2
+	OpPing      Opcode = 3
+	OpPong      Opcode = 4
 )
+
+type Frame struct {
+	V        int    `json:"v"`
+	ClientID string `json:"client_id"`
+	Cmd      string `json:"cmd,omitempty"`
+	Args     Args   `json:"args,omitempty"`
+	Nonce    string `json:"nonce,omitempty"`
+}
+
+type Args struct {
+	PID      int       `json:"pid,omitempty"`
+	Activity *Activity `json:"activity,omitempty"`
+}
+
+type Activity struct {
+	Details    string      `json:"details,omitempty"`
+	State      string      `json:"state,omitempty"`
+	Assets     *Assets     `json:"assets,omitempty"`
+	Timestamps *Timestamps `json:"timestamps,omitempty"`
+	Party      *Party      `json:"party,omitempty"`
+	Buttons    *[]Button   `json:"buttons,omitempty"`
+}
+
+type Timestamps struct {
+	Start int `json:"start,omitempty"`
+	End   int `json:"end,omitempty"`
+}
+
+type Party struct {
+	ID   string `json:"id,omitempty"`
+	Size [2]int `json:"size,omitempty"` // corrected
+}
+
+type Button struct {
+	Label string `json:"label,omitempty"`
+	URL   string `json:"url,omitempty"`
+}
+
+type Assets struct {
+	LargeImage string `json:"large_image,omitempty"`
+	LargeText  string `json:"large_text,omitempty"`
+	SmallImage string `json:"small_image,omitempty"`
+	SmallText  string `json:"small_text,omitempty"`
+}
