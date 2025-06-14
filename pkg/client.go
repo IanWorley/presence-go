@@ -12,11 +12,16 @@ import (
 )
 
 type Client struct {
-	ID       string
-	Conn     Connection
-	sendChan chan []byte
-	done     chan struct{}
-	ready    chan struct{}
+	ID        string
+	Conn      Connection
+	sendChan  chan []byte
+	done      chan struct{}
+	ready     chan struct{}
+	errChan   chan error
+	OnError   func(error)
+	OnReady   func()
+	OnReceive func(string)
+	OnClose   func()
 }
 
 type RPC interface {
@@ -27,7 +32,7 @@ type RPC interface {
 }
 
 func (c *Client) Connect() error {
-	message := Frame{
+	message := Status{
 		V:        1,
 		ClientID: c.ID,
 	}
@@ -70,31 +75,25 @@ func (c *Client) eventLoop() error {
 			default:
 				msg, err := c.Conn.Receive()
 				if err != nil {
-					// handle error, maybe close c.done
+					c.errChan <- err
 					return
 				}
 				opcode := binary.LittleEndian.Uint32([]byte(msg))
 				switch opcode {
 				case uint32(OpPong):
-					slog.Info("Pong received")
 					readyOnce.Do(func() {
 						c.ready <- struct{}{}
-						slog.Info("Ready")
 					})
 				case uint32(OpFrame):
-					slog.Info("Frame received")
-					var status map[string]any
+					var status Status
 					body := []byte(msg)
 					json.Unmarshal(body[8:], &status)
-					slog.Info("Status", "status", status)
 				case uint32(OpClose):
-					slog.Info("Close received")
 					c.Disconnect()
 					return
 				}
 
 			}
-
 		}
 	}()
 
@@ -106,16 +105,17 @@ func (c *Client) eventLoop() error {
 			case <-c.done:
 				return
 			case <-ticker.C:
-				pingMsg, err := c.buildMessage(Frame{V: 1, ClientID: c.ID, Cmd: "PING"}, OpPing)
+				pingMsg, err := c.buildMessage(Status{V: 1, ClientID: c.ID, Cmd: "PING"}, OpPing)
 				if err != nil {
+					c.errChan <- err
 					return
 				}
-				slog.Info("Ping sent")
 				c.Conn.Send(pingMsg)
 			case msg := <-c.sendChan:
 				err := c.Conn.Send(msg)
 				if err != nil {
-					slog.Error("Error sending message", "error", err)
+					c.errChan <- err
+					return
 				}
 			}
 		}
@@ -129,7 +129,7 @@ func (c *Client) Disconnect() error {
 	return c.Conn.Disconnect()
 }
 
-func (c *Client) buildMessage(frame Frame, opcode Opcode) ([]byte, error) {
+func (c *Client) buildMessage(frame Status, opcode Opcode) ([]byte, error) {
 
 	defaultJSON, err := json.Marshal(frame)
 	if err != nil {
@@ -144,7 +144,7 @@ func (c *Client) buildMessage(frame Frame, opcode Opcode) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-func (c *Client) Send(frame Frame) error {
+func (c *Client) Send(frame Status) error {
 	completedMessage, err := c.buildMessage(frame, OpFrame)
 	if err != nil {
 		return err
@@ -152,6 +152,45 @@ func (c *Client) Send(frame Frame) error {
 
 	c.sendChan <- completedMessage
 	return nil
+}
+
+func (c *Client) errorHandler() {
+	for err := range c.errChan {
+		if c.OnError != nil {
+			c.OnError(err)
+		} else {
+			slog.Error("Client error", "error", err)
+		}
+	}
+}
+
+func (c *Client) readyHandler() {
+	for range c.ready {
+		if c.OnReady != nil {
+			c.OnReady()
+		}
+	}
+}
+
+func (c *Client) receiveHandler() {
+	for {
+		msg, err := c.Conn.Receive()
+		if err != nil {
+			c.errChan <- err
+			return
+		}
+		if c.OnReceive != nil {
+			c.OnReceive(string(msg))
+		}
+	}
+}
+
+func (c *Client) closeHandler() {
+	for range c.done {
+		if c.OnClose != nil {
+			c.OnClose()
+		}
+	}
 }
 
 func NewClient(id string) *Client {
@@ -169,12 +208,12 @@ const (
 	OpPong      Opcode = 4
 )
 
-type Frame struct {
+type Status struct {
 	V        int    `json:"v"`
 	ClientID string `json:"client_id"`
 	Cmd      string `json:"cmd,omitempty"`
 	Args     Args   `json:"args,omitempty"`
-	Nonce    string `json:"nonce,omitempty"`
+	Nonce    string `json:"nonce,omitempty"` // TODO: make this a uuid
 }
 
 type Args struct {
