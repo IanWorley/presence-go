@@ -58,6 +58,11 @@ func (c *connectionUnixSocket) GetConnection() net.Conn {
 	return c.conn
 }
 
+type WindowsConnection struct {
+	conn net.Conn
+	path string
+}
+
 type Connection interface {
 	Connect() error
 	Disconnect() error

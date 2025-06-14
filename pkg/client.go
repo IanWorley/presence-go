@@ -16,7 +16,6 @@ type Client struct {
 	Conn     Connection
 	sendChan chan []byte
 	done     chan struct{}
-	activity map[string]any
 }
 
 type RPC interface {
@@ -85,8 +84,9 @@ func (c *Client) eventLoop() error {
 
 				case OpFrame:
 					slog.Info("Frame received")
-					json.Unmarshal([]byte(msg), &c.activity)
-					slog.Info("Activity", "activity", c.activity)
+					var status map[string]any
+					body := []byte(msg)
+					json.Unmarshal(body[8:], &status)
 				case OpClose:
 					slog.Info("Close received")
 					c.Disconnect()
