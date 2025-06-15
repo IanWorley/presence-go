@@ -1,7 +1,9 @@
 package pkg
 
 import (
+	"encoding/binary"
 	"fmt"
+	"io"
 	"net"
 	"os"
 
@@ -44,16 +46,13 @@ func (c *connectionUnixSocket) Send(data []byte) error {
 	return nil
 }
 
-func (c *connectionUnixSocket) Receive() (string, error) {
-
-	// TOOD: Get the length and abastract away logic of parsing request :)
-
-	buf := make([]byte, 1024*1024)
-	n, err := c.conn.Read(buf)
+func (c *connectionUnixSocket) Receive() ([]byte, error) {
+	frame, err := readFrame(c.conn)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	return string(buf[:n]), nil
+
+	return frame, nil
 }
 
 func (c *connectionUnixSocket) GetPath() string {
@@ -84,14 +83,37 @@ func (c *connectionWindows) Disconnect() error {
 	return err
 }
 
-func (c *connectionWindows) Receive() (string, error) {
-
-	buf := make([]byte, 1024*1024)
-	n, err := c.conn.Read(buf)
+func readFrame(conn net.Conn) ([]byte, error) {
+	header := make([]byte, 8)
+	_, err := io.ReadFull(conn, header)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	return string(buf[:n]), nil
+	length := binary.LittleEndian.Uint32(header[4:8])
+	body := make([]byte, length)
+	_, err = io.ReadFull(conn, body)
+	if err != nil {
+		return nil, err
+	}
+	if len(body) != int(length) {
+		return nil, fmt.Errorf("expected %d bytes, got %d", length, len(body))
+	}
+	msgLength := length + 8
+	msg := make([]byte, msgLength)
+	_, err = io.ReadFull(conn, msg)
+	if err != nil {
+		return nil, err
+	}
+	return msg, nil
+}
+
+func (c *connectionWindows) Receive() ([]byte, error) {
+	frame, err := readFrame(c.conn)
+	if err != nil {
+		return nil, err
+	}
+
+	return frame, nil
 }
 
 func (c *connectionWindows) Send(data []byte) error {
@@ -114,7 +136,7 @@ type Connection interface {
 	Connect() error
 	Disconnect() error
 	Send(data []byte) error
-	Receive() (string, error)
+	Receive() ([]byte, error)
 	GetPath() string
 }
 

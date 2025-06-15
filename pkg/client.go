@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/json"
-	"fmt"
 	"log/slog"
 	"runtime"
 	"sync"
@@ -52,7 +51,7 @@ func (c *Client) Connect() error {
 		return err
 	}
 
-	response, err := c.Conn.Receive()
+	_, err = c.Conn.Receive()
 	if err != nil {
 		return err
 	}
@@ -60,7 +59,6 @@ func (c *Client) Connect() error {
 	<-c.ready
 	close(c.ready)
 
-	fmt.Println("handshake response", response)
 	return nil
 }
 
