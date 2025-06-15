@@ -61,11 +61,34 @@ func (c *connectionUnixSocket) GetPath() string {
 func ConnectionFactory(platform string) Connection {
 	switch platform {
 	case "darwin":
-		return &connectionUnixSocket{path: os.Getenv("TMPDIR") + "/discord-ipc-0"}
+		path, err := findDiscordIPC(os.Getenv("TMPDIR"))
+		if err != nil {
+			return nil
+		}
+		return &connectionUnixSocket{path: path}
 	case "linux":
-		return &connectionUnixSocket{path: os.Getenv("XDG_RUNTIME_DIR") + "/discord-ipc-0"}
-
+		path, err := findDiscordIPC(os.Getenv("XDG_RUNTIME_DIR"))
+		if err != nil {
+			return nil
+		}
+		return &connectionUnixSocket{path: path}
 	default:
 		return nil
 	}
+}
+
+func findDiscordIPC(path string) (string, error) {
+	for {
+		for i := 0; i < 10; i++ {
+			filePath := fmt.Sprintf("%s/discord-ipc-%d", path, i)
+			conn, err := net.Dial("unix", filePath)
+			if err != nil {
+				continue
+			}
+			conn.Close()
+			return filePath, nil
+		}
+		return "", fmt.Errorf("discord-ipc-0 not found")
+	}
+
 }

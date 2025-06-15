@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"runtime"
 	"sync"
@@ -11,16 +12,18 @@ import (
 )
 
 type Client struct {
-	ID        string
-	Conn      Connection
-	sendChan  chan []byte
-	done      chan struct{}
-	ready     chan struct{}
-	errChan   chan error
-	OnError   func(error)
-	OnReady   func()
-	OnReceive func(string)
-	OnClose   func()
+	ID          string
+	Conn        Connection
+	sendChan    chan []byte
+	done        chan struct{}
+	ready       chan struct{}
+	errChan     chan error
+	receiveChan chan []byte
+	OnError     func(error)
+	OnReady     func()
+	OnReceive   func([]byte)
+	OnClose     func()
+	closeOnce   sync.Once
 }
 
 type RPC interface {
@@ -51,12 +54,24 @@ func (c *Client) Connect() error {
 		return err
 	}
 
+	fmt.Println("handshake sent")
+
 	_, err = c.Conn.Receive()
 	if err != nil {
 		return err
 	}
+
+	fmt.Println("handshake received")
+
 	go c.eventLoop()
+
 	<-c.ready
+
+	go c.errorHandler()
+	go c.readyHandler()
+	go c.receiveHandler()
+	go c.closeHandler()
+
 	close(c.ready)
 
 	return nil
@@ -72,13 +87,17 @@ func (c *Client) eventLoop() error {
 				return
 			default:
 				msg, err := c.Conn.Receive()
+				fmt.Println("msg", msg)
 				if err != nil {
 					c.errChan <- err
+					c.Disconnect()
+
 					return
 				}
 				opcode := binary.LittleEndian.Uint32([]byte(msg))
 				switch opcode {
 				case uint32(OpPong):
+					fmt.Println("pong received")
 					readyOnce.Do(func() {
 						c.ready <- struct{}{}
 					})
@@ -88,6 +107,7 @@ func (c *Client) eventLoop() error {
 					json.Unmarshal(body[8:], &status)
 				case uint32(OpClose):
 					c.Disconnect()
+					c = recreateClient(c)
 					return
 				}
 
@@ -96,7 +116,7 @@ func (c *Client) eventLoop() error {
 	}()
 
 	go func() {
-		ticker := time.NewTicker(15 * time.Second)
+		ticker := time.NewTicker(5 * time.Second)
 		defer ticker.Stop()
 		for {
 			select {
@@ -115,7 +135,10 @@ func (c *Client) eventLoop() error {
 					c.errChan <- err
 					return
 				}
+			default:
+				continue
 			}
+
 		}
 	}()
 
@@ -123,7 +146,14 @@ func (c *Client) eventLoop() error {
 }
 
 func (c *Client) Disconnect() error {
-	c.done <- struct{}{}
+	c.closeOnce.Do(func() {
+		close(c.sendChan)
+		close(c.receiveChan)
+		<-c.errChan
+		close(c.errChan)
+
+		c.done <- struct{}{}
+	})
 	return c.Conn.Disconnect()
 }
 
@@ -172,28 +202,31 @@ func (c *Client) readyHandler() {
 
 func (c *Client) receiveHandler() {
 	for {
-		msg, err := c.Conn.Receive()
-		if err != nil {
-			c.errChan <- err
-			return
-		}
+		msg := <-c.receiveChan
+
 		if c.OnReceive != nil {
-			c.OnReceive(string(msg))
+			c.OnReceive(msg)
 		}
 	}
 }
 
 func (c *Client) closeHandler() {
 	for range c.done {
+		fmt.Println("closeHandler")
 		if c.OnClose != nil {
 			c.OnClose()
 		}
 	}
 }
 
+func recreateClient(c *Client) *Client {
+	conn := ConnectionFactory(runtime.GOOS)
+	return &Client{ID: c.ID, Conn: conn, sendChan: make(chan []byte), done: make(chan struct{}), ready: make(chan struct{}), errChan: make(chan error), receiveChan: make(chan []byte), OnError: c.OnError, OnReady: c.OnReady, OnReceive: c.OnReceive, OnClose: c.OnClose}
+}
+
 func NewClient(id string) *Client {
 	conn := ConnectionFactory(runtime.GOOS)
-	return &Client{ID: id, Conn: conn, sendChan: make(chan []byte), done: make(chan struct{}), ready: make(chan struct{})}
+	return &Client{ID: id, Conn: conn, sendChan: make(chan []byte), done: make(chan struct{}), ready: make(chan struct{}), errChan: make(chan error), receiveChan: make(chan []byte), OnError: nil, OnReady: nil, OnReceive: nil, OnClose: nil}
 }
 
 type Opcode uint32

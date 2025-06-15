@@ -22,12 +22,11 @@ func readFrame(conn net.Conn) ([]byte, error) {
 	if len(body) != int(length) {
 		return nil, fmt.Errorf("expected %d bytes, got %d", length, len(body))
 	}
-	msgLength := length + 8
-	msg := make([]byte, msgLength)
-	_, err = io.ReadFull(conn, msg)
-	if err != nil {
-		return nil, err
-	}
+
+	msg := make([]byte, length+8)
+	copy(msg, header)
+	copy(msg[8:], body)
+
 	return msg, nil
 }
 

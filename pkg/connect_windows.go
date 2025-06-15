@@ -6,13 +6,14 @@ package pkg
 import (
 	"fmt"
 	"net"
+	"os"
 
 	"github.com/Microsoft/go-winio"
 )
 
 type connectionWindows struct {
-	conn net.Conn // active connection from Accept() or DialPipe()
-	path string   // pipe path, e.g. \\.\pipe\mypipe
+	conn net.Conn
+	path string
 }
 
 func (c *connectionWindows) Connect() error {
@@ -60,11 +61,30 @@ func (c *connectionWindows) GetPath() string {
 }
 
 // Not a factory, just a helper function to create a new connectionWindows
-func ConnectionFactory(path string) Connection {
-	switch path {
+func ConnectionFactory(platform string) Connection {
+	switch platform {
 	case "windows":
-		return &connectionWindows{path: `\\.\pipe\discord-ipc-0`}
+		path, err := findDiscordIPC(os.Getenv("TMPDIR"))
+		if err != nil {
+			return nil
+		}
+		return &connectionWindows{path: path}
 	default:
 		return nil
+	}
+}
+
+func findDiscordIPC(path string) (string, error) {
+	for {
+		for i := 0; i < 10; i++ {
+			filePath := fmt.Sprintf(`\\.\pipe\discord-ipc-%d`, i)
+			conn, err := winio.DialPipe(filePath, nil)
+			if err != nil {
+				continue
+			}
+			conn.Close()
+			return filePath, nil
+		}
+		return "", fmt.Errorf("discord-ipc-0 not found")
 	}
 }
