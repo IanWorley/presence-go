@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"net"
 	"os"
+
+	"github.com/Microsoft/go-winio"
 )
 
 type connectionUnixSocket struct {
@@ -43,6 +45,9 @@ func (c *connectionUnixSocket) Send(data []byte) error {
 }
 
 func (c *connectionUnixSocket) Receive() (string, error) {
+
+	// TOOD: Get the length and abastract away logic of parsing request :)
+
 	buf := make([]byte, 1024*1024)
 	n, err := c.conn.Read(buf)
 	if err != nil {
@@ -55,13 +60,54 @@ func (c *connectionUnixSocket) GetPath() string {
 	return c.path
 }
 
-func (c *connectionUnixSocket) GetConnection() net.Conn {
-	return c.conn
+type connectionWindows struct {
+	conn net.Conn // active connection from Accept() or DialPipe()
+	path string   // pipe path, e.g. \\.\pipe\mypipe
 }
 
-type WindowsConnection struct {
-	conn net.Conn
-	path string
+func (c *connectionWindows) Connect() error {
+	var err error
+	c.conn, err = winio.DialPipe(c.path, nil)
+	if err != nil {
+		return fmt.Errorf("error connecting to %s: %w", c.path, err)
+	}
+	return nil
+}
+
+func (c *connectionWindows) Disconnect() error {
+	if c.conn == nil {
+		return nil
+	}
+
+	err := c.conn.Close()
+	c.conn = nil
+	return err
+}
+
+func (c *connectionWindows) Receive() (string, error) {
+
+	buf := make([]byte, 1024*1024)
+	n, err := c.conn.Read(buf)
+	if err != nil {
+		return "", err
+	}
+	return string(buf[:n]), nil
+}
+
+func (c *connectionWindows) Send(data []byte) error {
+	if c.conn == nil {
+		return fmt.Errorf("connection not established")
+	}
+	_, err := c.conn.Write(data)
+	if err != nil {
+		return fmt.Errorf("error sending data: %w", err)
+	}
+	return nil
+}
+
+func (c *connectionWindows) GetPath() string {
+
+	return c.path
 }
 
 type Connection interface {
@@ -70,7 +116,6 @@ type Connection interface {
 	Send(data []byte) error
 	Receive() (string, error)
 	GetPath() string
-	GetConnection() net.Conn
 }
 
 func ConnectionFactory(platform string) Connection {
@@ -80,8 +125,7 @@ func ConnectionFactory(platform string) Connection {
 	case "linux":
 		return &connectionUnixSocket{path: os.Getenv("XDG_RUNTIME_DIR") + "/discord-ipc-0"}
 	case "windows":
-		return nil
-
+		return &connectionWindows{path: `\\.\pipe\discord-ipc-0`}
 	default:
 		return nil
 	}
